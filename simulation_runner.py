@@ -137,7 +137,7 @@ def run_case(
 
         "reactor_duty": reactor.HeatFlowValue,
 
-        "carbon_efficiency": methanol.ComponentMassFlowValue[meoh_index]/co2in.ComponentMassFlowValue[co2_index],
+        "carbon_efficiency": methanol.ComponentMolarFlowValue[meoh_index]/co2in.ComponentMolarFlowValue[co2_index],
 
         "timestamp":
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
