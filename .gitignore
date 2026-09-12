@@ -1,3 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
+
+# ignore the backup files
+*.bk0
