@@ -87,6 +87,7 @@ def cache_objects(case) -> dict:
         "rout": streams("RoutV"),        # reactor outlet
         "methanol": streams("Methanol"),
         "purge": purge,
+        "recycle_gas": streams("VAPToMixer"),   # recycle after compression, into MIX-101
         # unit operations
         "reactor": ops("Reactor100"),
         "split": ops("TEE-100"),         # purge / recycle tee
@@ -216,6 +217,7 @@ def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
         "reactor_duty_kW": reactor.HeatFlowValue,
         "reactor_dP_kPa": reactor.PressureDropValue,
         "carbon_efficiency": meoh.ComponentMolarFlowValue[m] / co2in.ComponentMolarFlowValue[co2],
+        "recycle_ratio": o["recycle_gas"].MolarFlowValue / (co2in.MolarFlowValue + h2in.MolarFlowValue),
         # convergence flags: filter rows on these before trusting the numbers
         "recycle_converged": recycle_ok,
         "column_converged": column_ok,
