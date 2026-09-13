@@ -273,6 +273,8 @@ def dump(obj, contains: str | None = None) -> None:
     """
     Print every readable property of a HYSYS COM object with its current value.
 
+    ``...Value`` properties are annotated with their internal unit, read from
+    the sibling variable object (``MassFlowValue`` -> ``MassFlow``).
     Properties that raise for the object's current state are shown as
     ``<error>`` rather than aborting.  Use `contains` to narrow the listing.
     """
@@ -282,12 +284,27 @@ def dump(obj, contains: str | None = None) -> None:
         title = "object"
     print(f"=== {title} ===")
     m = members(obj, contains)
+    readable = set(members(obj)["read-write"]) | set(members(obj)["read-only"])
+    try:
+        units = obj.Application.UnitConversionSetManager
+    except Exception:
+        units = None
+
+    def unit_for(name: str) -> str:
+        base = name[:-5]
+        if units is None or not name.endswith("Value") or base not in readable:
+            return ""
+        try:
+            return units.Item(getattr(obj, base).UnitConversionType).CalculationUnit.name
+        except Exception:
+            return ""
+
     for kind in ("read-write", "read-only"):
         if m[kind]:
             print(f"\n[{kind}]")
         for name in m[kind]:
             try:
-                print(f"  {name:36s} {_fmt(getattr(obj, name))}")
+                print(f"  {name:36s} {_fmt(getattr(obj, name))} {unit_for(name)}".rstrip())
             except Exception:
                 print(f"  {name:36s} <error>")
     if m["methods"]:
