@@ -92,6 +92,7 @@ def cache_objects(case) -> dict:
         "split": ops("TEE-100"),         # purge / recycle tee
         "column": ops("Twp101"),
         "flare": ops("CRV-100"),
+        "recycle": ops("RCY-1"),         # convergence status of the synthesis loop
         # spreadsheet cells that fan out to several specs
         "pressure_cell": ops("MeOH Pressure").Cell("A1"),           # kPa
         "ratio_cell": ops("co2:h2_ratio_equals_3").Cell("C2"),     # H2 : CO2
@@ -194,6 +195,8 @@ def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
 
     co2in, h2in, meoh, purge, reactor = o["co2in"], o["h2in"], o["methanol"], o["purge"], o["reactor"]
     h2, co2, m = o["h2_index"], o["co2_index"], o["meoh_index"]
+    column_ok = bool(o["column"].ColumnFlowsheet.CfsConverged)
+    recycle_ok = (o["recycle"].RecycleConvergence == 1)
     return {
         "pressure_set": pressure,
         "temperature_set": temperature,
@@ -211,7 +214,13 @@ def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
         "co2_input_kg_h": co2in.MassFlowValue * 3600,
         "h2_input_kg_h": h2in.MassFlowValue * 3600,
         "reactor_duty_kW": reactor.HeatFlowValue,
+        "reactor_dP_kPa": reactor.PressureDropValue,
         "carbon_efficiency": meoh.ComponentMolarFlowValue[m] / co2in.ComponentMolarFlowValue[co2],
+        # convergence flags: filter rows on these before trusting the numbers
+        "recycle_converged": recycle_ok,
+        "column_converged": column_ok,
+        "recycle_iterations": int(o["recycle"].IterationsValue),
+        "converged": recycle_ok and column_ok,
         "solve_time_s": round(time.time() - t0, 2),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
