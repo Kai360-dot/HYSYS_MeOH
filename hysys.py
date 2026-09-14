@@ -26,7 +26,7 @@ import win32com.client
 
 __all__ = [
     "open_case", "cache_objects", "run_point",
-    "to_internal", "unit_of", "members", "dump",
+    "to_internal", "unit_of", "members", "dump", "by_component",
 ]
 
 
@@ -231,6 +231,20 @@ def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
 # ---------------------------------------------------------------------------
 # Inspection
 # ---------------------------------------------------------------------------
+def by_component(stream, prop: str = "ComponentMolarFractionValue") -> dict[str, float]:
+    """
+    Return a per-component stream property keyed by component name.
+
+    HYSYS returns component arrays as tuples in fluid-package order; this
+    pairs them with the package's component names so callers never index by
+    position.  `prop` is any ``Component...Value`` property, e.g.
+    ``"ComponentMolarFlowValue"`` (kgmole/s) or ``"ComponentMassFlowValue"`` (kg/s).
+    """
+    names = stream.FluidPackage.Components.Names
+    return dict(zip(names, getattr(stream, prop)))
+
+
+
 _COM_PLUMBING = {"AddRef", "Release", "QueryInterface", "GetTypeInfo",
                  "GetTypeInfoCount", "GetIDsOfNames", "Invoke"}
 
