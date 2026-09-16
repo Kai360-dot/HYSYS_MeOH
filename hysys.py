@@ -1,26 +1,25 @@
 """
-Generic helpers for driving an Aspen HYSYS cases from Python via COM.
+Generic helpers for driving Aspen HYSYS cases from Python via COM.
 
-Typical session::
+Every number that crosses the COM boundary carries an explicit unit:
 
-    from hysys import open_case, cache_objects, run_point, dump
+    write(stream.Temperature, (250, "C"))          # set
+    read(stream.Pressure, "bar")                   # get
+    by_component(stream, "ComponentMassFlow", "kg/h")   # {"Hydrogen": ..., ...}
 
-    case    = open_case(r"C:\\...\\filename.hsc")
-    objects = cache_objects(case)
-    dump(objects["reactor"])
-
-Values ending in ``Value`` on HYSYS objects are plain numbers in HYSYS
-internal units (kPa, C, m3, kg/s, kgmole/s, kJ/s).  Inputs to ``run_point``
-may be given as bare numbers in those units or as ``(number, "unit")`` pairs,
-which are converted through HYSYS's own unit tables.
+Flowsheet-specific modules (``hysys_methanol``, ``hysys_pfr``) build on these
+and expose ``cache_objects(case)`` and ``run_point(objects, ...)``.
 """
 from __future__ import annotations
 
 import time
-from datetime import datetime
 
 import pythoncom
 import win32com.client
+
+__all__ = ["open_case", "solve", "read", "write", "by_component", "to_internal",
+           "unit_of", "members", "dump"]
+
 
 # ---------------------------------------------------------------------------
 # Connection
@@ -30,9 +29,8 @@ def open_case(path: str, visible: bool = True):
     Return the HYSYS case at `path`, attaching if it is already open.
 
     HYSYS registers each open case in the Windows Running Object Table under
-    its file path.  If an entry matches, attach to it; otherwise start a new
-    HYSYS instance and open the file.  `path` must be absolute and match the
-    file name HYSYS used when opening it (comparison is case-insensitive).
+    its file path.  If an entry matches, attach; otherwise launch HYSYS and
+    open the file.  `path` must be absolute; the comparison is case-insensitive.
     """
     pythoncom.CoInitialize()
     rot = pythoncom.GetRunningObjectTable()
@@ -53,41 +51,9 @@ def open_case(path: str, visible: bool = True):
     app.Visible = visible
     return app.SimulationCases.Open(path)
 
-# ---------------------------------------------------------------------------
-# Units
-# ---------------------------------------------------------------------------
-def to_internal(units, quantity: str, value):
-    """
-    Convert `value` to HYSYS internal units.
-
-    `value` is a bare number (returned unchanged, as float) or a
-    ``(number, "unit")`` pair.  `quantity` names a HYSYS unit set such as
-    "Pressure", "Temperature" or "Volume"; `units` is the case's
-    UnitConversionSetManager (``objects["units"]``).  Unknown unit names raise.
-    """
-    if value is None:
-        return None
-    if isinstance(value, tuple):
-        number, unit = value
-        return units.Item(quantity).Item(unit).ToCalculationUnit(float(number))
-    return float(value)  # float() also accepts numpy scalars, which COM rejects
-
-def unit_of(units, variable) -> tuple[str, str]:
-    """
-    Return ``(internal_unit, display_unit)`` for a HYSYS variable object.
-
-    `variable` is the un-suffixed property, e.g. ``stream.MassFlow`` rather
-    than ``stream.MassFlowValue``.
-    """
-    uset = units.Item(variable.UnitConversionType)
-    return uset.CalculationUnit.name, uset.CurrentDisplayUnit.name
-
-# ---------------------------------------------------------------------------
-# Running a point
-# ---------------------------------------------------------------------------
 
 def solve(solver, timeout: float) -> None:
-    """Let the solver run and block until it has finished forgetting and solving."""
+    """Release the solver and block until it has finished forgetting and solving."""
     solver.CanSolve = True
     start = time.time()
     while solver.IsForgetting or solver.IsSolving:
@@ -97,23 +63,59 @@ def solve(solver, timeout: float) -> None:
         time.sleep(0.1)
     solver.CanSolve = False
 
+
+# ---------------------------------------------------------------------------
+# Units: every value is a (number, "unit") pair on the way in, and every read
+# names its unit.  Conversion is done by HYSYS; unknown unit names raise.
+# ---------------------------------------------------------------------------
+def _pair(value) -> tuple[float, str]:
+    """Validate a ``(number, "unit")`` pair; numpy scalars are cast to float."""
+    try:
+        number, unit = value
+        return float(number), str(unit)
+    except (TypeError, ValueError):
+        raise TypeError(f"expected (number, 'unit'), got {value!r}") from None
+
+
+def write(variable, value) -> None:
+    """Set a HYSYS variable: ``write(stream.Temperature, (250, "C"))``."""
+    variable.SetValue(*_pair(value))
+
+
+def read(variable, unit: str) -> float:
+    """Read a HYSYS variable in `unit`: ``read(stream.Pressure, "bar")``."""
+    return float(variable.GetValue(unit))
+
+
+def by_component(stream, prop: str, unit: str) -> dict[str, float]:
+    """
+    Read a per-component stream array keyed by component name, e.g.
+    ``by_component(stream, "ComponentMolarFlow", "kgmole/h")``.
+    Use ``unit=""`` for dimensionless arrays such as ``ComponentMolarFraction``.
+    """
+    names = stream.FluidPackage.Components.Names
+    return dict(zip(names, getattr(stream, prop).GetValues(unit)))
+
+
+def to_internal(units, quantity: str, value) -> float:
+    """
+    Convert a ``(number, "unit")`` pair to HYSYS's calculation unit for
+    `quantity` (a unit-set name such as "Pressure").  Needed only for targets
+    that have no unit of their own, such as spreadsheet cells.
+    """
+    number, unit = _pair(value)
+    return units.Item(quantity).Item(unit).ToCalculationUnit(number)
+
+
+def unit_of(units, variable) -> tuple[str, str]:
+    """Return ``(calculation_unit, display_unit)`` for a HYSYS variable object."""
+    uset = units.Item(variable.UnitConversionType)
+    return uset.CalculationUnit.name, uset.CurrentDisplayUnit.name
+
+
 # ---------------------------------------------------------------------------
 # Inspection
 # ---------------------------------------------------------------------------
-def by_component(stream, prop: str = "ComponentMolarFractionValue") -> dict[str, float]:
-    """
-    Return a per-component stream property keyed by component name.
-
-    HYSYS returns component arrays as tuples in fluid-package order; this
-    pairs them with the package's component names so callers never index by
-    position.  `prop` is any ``Component...Value`` property, e.g.
-    ``"ComponentMolarFlowValue"`` (kgmole/s) or ``"ComponentMassFlowValue"`` (kg/s).
-    """
-    names = stream.FluidPackage.Components.Names
-    return dict(zip(names, getattr(stream, prop)))
-
-
-
 _COM_PLUMBING = {"AddRef", "Release", "QueryInterface", "GetTypeInfo",
                  "GetTypeInfoCount", "GetIDsOfNames", "Invoke"}
 
@@ -167,10 +169,9 @@ def dump(obj, contains: str | None = None) -> None:
     """
     Print every readable property of a HYSYS COM object with its current value.
 
-    ``...Value`` properties are annotated with their internal unit, read from
-    the sibling variable object (``MassFlowValue`` -> ``MassFlow``).
-    Properties that raise for the object's current state are shown as
-    ``<error>`` rather than aborting.  Use `contains` to narrow the listing.
+    ``...Value`` properties are annotated with their calculation unit, read
+    from the sibling variable object (``MassFlowValue`` -> ``MassFlow``).
+    Properties that raise for the object's current state print as ``<error>``.
     """
     try:
         title = f"{obj.Name} ({obj.TypeName})"

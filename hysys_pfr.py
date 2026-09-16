@@ -1,104 +1,85 @@
 """
 PFR in isolation: the methanol reactor with its inlet and outlet streams only.
-Generic HYSYS helpers (connection, units, inspection) live in ``hysys.py``.
+Generic helpers live in ``hysys.py``.
 
-Typical session::
-
-    from hysys import open_case, dump
+    from hysys import open_case
     from hysys_pfr import cache_objects, run_point
 
     case    = open_case(r"C:\\...\\PFR.hsc")
     objects = cache_objects(case)
     row     = run_point(objects, pressure=(90, "bar"), temperature=(259, "C"), volume=(19, "m3"),
-                        Hydrogen=2.25, CO=0.059, CO2=0.50, H2O=0.008, Methanol=0.004, Nitrogen=0.045)
+                        flows=({"Hydrogen": 8106, "CO": 212, "CO2": 1803, "H2O": 29,
+                                "Methanol": 16, "Nitrogen": 162}, "kgmole/h"))
 
-Component flows are inlet molar flows in kgmole/s (HYSYS internal), or
-``(number, "unit")`` pairs such as ``(8100, "kgmole/h")``.  Components not
-named are set to zero.  The reactor runs isothermally: the outlet temperature
-is set equal to the inlet and the duty is a result.
+Dimensioned inputs are ``(number, "unit")`` pairs; `flows` is a
+``({component: number}, "unit")`` pair and unnamed components are zero.  The
+reactor runs isothermally: outlet temperature is set equal to the inlet and
+the duty is a result.  Result keys name their unit.
 """
 from __future__ import annotations
 
 import time
 from datetime import datetime
 
-from hysys import to_internal, solve, by_component
+from hysys import read, write, by_component, solve
 
 __all__ = ["cache_objects", "run_point"]
 
+FLOW_UNIT = "kgmole/h"          # unit of the in_* / out_* result keys
 
-# ---------------------------------------------------------------------------
-# Flowsheet objects
-# ---------------------------------------------------------------------------
+
 def cache_objects(case) -> dict:
-    """
-    Look up the streams and unit operations used by `run_point` once.
-
-    Each attribute access on a COM proxy is a round trip into HYSYS, so
-    callers keep this dict for the life of the session.
-    """
+    """Look up the streams and reactor used by `run_point` once per session."""
     fs = case.Flowsheet
     rin = fs.MaterialStreams("RinV")
     return {
         "solver": case.Solver,
-        "units": case.Application.UnitConversionSetManager,
         "rin": rin,                                  # reactor inlet: fully specified per point
         "rout": fs.MaterialStreams("RoutV"),         # reactor outlet
         "reactor": fs.Operations("Reactor100"),
-        "components": list(rin.FluidPackage.Components.Names),   # order of Component...Value tuples
+        "components": list(rin.FluidPackage.Components.Names),   # order of component arrays
     }
 
 
-# ---------------------------------------------------------------------------
-# Running a point
-# ---------------------------------------------------------------------------
-def run_point(objects: dict, *, pressure, temperature, volume,
-              timeout: float = 120.0, **flows) -> dict:
+def run_point(objects: dict, *, pressure, temperature, volume, flows,
+              timeout: float = 120.0) -> dict:
     """
-    Set inlet conditions, composition and reactor volume, solve, return a flat dict.
+    Set inlet conditions, composition and reactor volume, solve, return one flat row.
 
-    `pressure`, `temperature`, `volume` accept bare numbers (kPa, C, m3) or
-    ``(number, "unit")`` pairs.  `flows` are inlet molar flows keyed by HYSYS
-    component name (kgmole/s or ``(number, "unit")``); unnamed components are
-    zero.  Outlet flows are returned per component as ``out_<name>`` in
-    kgmole/s, alongside CO2 conversion, duty and pressure drop.
+    Outlet flows come back per component as ``out_<name>_kgmole_h`` next to
+    the inlet ``in_<name>_kgmole_h``, plus CO2 conversion, duty and pressure drop.
     """
     o = objects
-    units, solver, rin, rout, reactor = o["units"], o["solver"], o["rin"], o["rout"], o["reactor"]
-    pressure = to_internal(units, "Pressure", pressure)
-    temperature = to_internal(units, "Temperature", temperature)
-    volume = to_internal(units, "Volume", volume)
-
-    unknown = set(flows) - set(o["components"])
+    solver, rin, rout, reactor = o["solver"], o["rin"], o["rout"], o["reactor"]
+    by_name, unit = flows
+    unknown = set(by_name) - set(o["components"])
     if unknown:
         raise KeyError(f"not in fluid package: {sorted(unknown)}; valid: {o['components']}")
-    inlet = tuple(to_internal(units, "Molar Flow", flows.get(c, 0.0)) for c in o["components"])
-
     t0 = time.time()
+
     solver.CanSolve = False
-    rin.PressureValue = pressure
-    rin.TemperatureValue = temperature
-    rout.TemperatureValue = temperature          # isothermal reactor, duty is the result
-    rin.ComponentMolarFlowValue = inlet          # sets composition and total flow together
-    reactor.TotalVolumeValue = volume
+    write(rin.Pressure, pressure)
+    write(rin.Temperature, temperature)
+    write(rout.Temperature, temperature)            # isothermal reactor, duty is a result
+    rin.ComponentMolarFlow.SetValues(tuple(float(by_name.get(c, 0.0)) for c in o["components"]), unit)
+    write(reactor.TotalVolume, volume)
     solve(solver, timeout)
-    solver.CanSolve = True                       # leave HYSYS live for interactive inspection
+    solver.CanSolve = True                          # leave HYSYS live for inspection
 
     converged = bool(rout.MolarFlow.IsKnown and rout.Temperature.IsKnown)
-    out = by_component(rout, "ComponentMolarFlowValue") if converged else {}
-    inlet_by_name = dict(zip(o["components"], inlet))
-    row = {
-        "pressure_set": pressure,
-        "temperature_set": temperature,
-        "volume_set": volume,
-        **{f"in_{c}": v for c, v in inlet_by_name.items()},
-        "inlet_kgmole_s": sum(inlet),
-        **{f"out_{c}": v for c, v in out.items()},
-        "co2_conversion": 1 - out["CO2"] / inlet_by_name["CO2"] if converged and inlet_by_name["CO2"] else None,
-        "reactor_duty_kW": reactor.HeatFlowValue if converged else None,
-        "reactor_dP_kPa": reactor.PressureDropValue if converged else None,
+    inlet = by_component(rin, "ComponentMolarFlow", FLOW_UNIT)
+    outlet = by_component(rout, "ComponentMolarFlow", FLOW_UNIT) if converged else {}
+    tag = FLOW_UNIT.replace("/", "_")
+    return {
+        "pressure_kPa": read(rin.Pressure, "kPa"),
+        "temperature_C": read(rin.Temperature, "C"),
+        "volume_m3": read(reactor.TotalVolume, "m3"),
+        **{f"in_{c}_{tag}": v for c, v in inlet.items()},
+        **{f"out_{c}_{tag}": v for c, v in outlet.items()},
+        "co2_conversion": 1 - outlet["CO2"] / inlet["CO2"] if converged and inlet["CO2"] else None,
+        "reactor_duty_kW": read(reactor.HeatFlow, "kW") if converged else None,
+        "reactor_dP_kPa": read(reactor.PressureDrop, "kPa") if converged else None,
         "converged": converged,
         "solve_time_s": round(time.time() - t0, 2),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-    return row
