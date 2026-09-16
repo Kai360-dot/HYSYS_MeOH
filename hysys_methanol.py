@@ -13,9 +13,12 @@ Typical session::
                         ratio=3.0, volume=(25, "m3"), purge_rate=0.05)
     dump(objects["reactor"])
 
-Inputs to ``run_point`` may be given as bare numbers in HYSYS internal units
-(kPa, C, m3) or as ``(number, "unit")`` pairs, which are converted through
-HYSYS's own unit tables.  Every result key carries its unit in its name
+Inputs to ``run_point`` are bare numbers in the units named by ``INPUT_UNITS``
+(kPa, C, m3) or ``(number, "unit")`` pairs, which are converted through
+HYSYS's own unit tables.  Nothing here relies on what HYSYS uses internally:
+values are written with ``SetValue(x, unit)`` and read with ``GetValue(unit)``,
+and the one unitless object (the pressure spreadsheet cell) is cross-checked
+against the reactor inlet pressure.  Every result key carries its unit in its name
 (``T_in_C``, ``methanol_kg_h``, ``reactor_duty_kW``); dimensionless keys have
 none.  Results are read from HYSYS with an explicit unit request, never via
 the ``...Value`` internal-unit properties.  ``RESULT_UNITS`` maps each key to
@@ -26,9 +29,18 @@ from __future__ import annotations
 import time
 from datetime import datetime
 
-from hysys import to_internal, solve, read, read_components
+from hysys import to_unit, solve, read, read_components
 
-__all__ = ["cache_objects", "run_point", "RESULT_UNITS"]
+__all__ = ["cache_objects", "run_point", "INPUT_UNITS", "RESULT_UNITS"]
+
+# Units of bare-number inputs to run_point (a (number, "unit") pair overrides them).
+INPUT_UNITS = {"pressure": "kPa", "temperature": "C", "volume": "m3"}
+
+# The pressure spreadsheet cell is a unitless number to COM.  Its unit is not
+# assumed: cache_objects() and run_point() both verify that the cell value
+# equals the reactor inlet pressure read explicitly in kPa.
+_PRESSURE_CELL_UNIT = "kPa"
+_PRESSURE_TOLERANCE = 0.005   # relative
 
 # ---------------------------------------------------------------------------
 # Flowsheet objects
@@ -45,7 +57,7 @@ def cache_objects(case) -> dict:
     streams, ops = fs.MaterialStreams, fs.Operations
     purge = streams("Purge")
     components = list(purge.FluidPackage.Components.Names)
-    return {
+    objects = {
         "solver": case.Solver,
         "units": case.Application.UnitConversionSetManager,
         # streams
@@ -70,6 +82,23 @@ def cache_objects(case) -> dict:
         "co2_index": components.index("CO2"),
         "meoh_index": components.index("Methanol"),
     }
+    _check_pressure_cell(objects)
+    return objects
+
+
+def _check_pressure_cell(o: dict) -> None:
+    """
+    Guard against the pressure cell being in some unit other than kPa.
+
+    The cell fans out to pressure specs; the reactor inlet stream must
+    therefore read the same number when asked explicitly for kPa.
+    """
+    cell = float(o["pressure_cell"].CellValue)
+    inlet = read(o["rin"].Pressure, _PRESSURE_CELL_UNIT)
+    if abs(cell - inlet) > _PRESSURE_TOLERANCE * max(abs(inlet), 1.0):
+        raise RuntimeError(
+            f"pressure cell reads {cell:g} but the reactor inlet is {inlet:g} {_PRESSURE_CELL_UNIT}: "
+            f"the cell's unit cannot be confirmed as {_PRESSURE_CELL_UNIT}")
 
 
 # ---------------------------------------------------------------------------
@@ -96,24 +125,28 @@ def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
     Set the operating point, solve, and return the results as a flat dict.
 
     Inputs left as None are not touched.  Pressure, temperature and volume
-    accept ``(number, "unit")`` pairs; ratio and purge_rate are dimensionless.
+    are bare numbers in kPa, C and m3 (``INPUT_UNITS``) or ``(number, "unit")``
+    pairs; ratio and purge_rate are dimensionless.
 
     Sequence: freeze the solver, ignore the column and flare so the synthesis
     loop converges without them, apply the inputs, solve, restore the column
     and flare, solve again.  Both solves are awaited.
 
     Result keys name their unit (see ``RESULT_UNITS``).  The ``*_set_*`` keys
-    echo the inputs after conversion to internal units (kPa, C, m3); the
-    ``*_actual*`` keys are read back from HYSYS: ``pressure_actual_kPa`` is
-    the reactor inlet stream pressure, ``T_in_C`` / ``T_out_C`` the reactor
-    inlet and outlet stream temperatures.  ``recycle_ratio_mol`` is recycle
-    gas molar flow over fresh feed molar flow.
+    echo the inputs converted to kPa, C and m3; the ``*_actual*`` keys are
+    read back from HYSYS in those units: ``pressure_actual_kPa`` is the
+    reactor inlet stream pressure, ``T_in_C`` / ``T_out_C`` the reactor inlet
+    and outlet stream temperatures.  ``recycle_ratio_mol`` is recycle gas
+    molar flow over fresh feed molar flow.
+
+    Raises RuntimeError if, after solving, the reactor inlet pressure does not
+    match the pressure that was set (the pressure cell is unitless to COM).
     """
     o = objects
     units, solver = o["units"], o["solver"]
-    pressure = to_internal(units, "Pressure", pressure)
-    temperature = to_internal(units, "Temperature", temperature)
-    volume = to_internal(units, "Volume", volume)
+    pressure = to_unit(units, "Pressure", pressure, INPUT_UNITS["pressure"])
+    temperature = to_unit(units, "Temperature", temperature, INPUT_UNITS["temperature"])
+    volume = to_unit(units, "Volume", volume, INPUT_UNITS["volume"])
 
     t0 = time.time()
     solver.CanSolve = False
@@ -121,14 +154,14 @@ def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
     o["flare"].IsIgnored = True
 
     if pressure is not None:
-        o["pressure_cell"].CellValue = pressure
+        o["pressure_cell"].CellValue = pressure                      # kPa, verified after the solve
     if temperature is not None:
-        o["rin"].TemperatureValue = temperature
-        o["rout"].TemperatureValue = temperature   # isothermal reactor
+        o["rin"].Temperature.SetValue(temperature, INPUT_UNITS["temperature"])
+        o["rout"].Temperature.SetValue(temperature, INPUT_UNITS["temperature"])   # isothermal reactor
     if ratio is not None:
         o["ratio_cell"].CellValue = float(ratio)
     if volume is not None:
-        o["reactor"].TotalVolumeValue = volume
+        o["reactor"].TotalVolume.SetValue(volume, INPUT_UNITS["volume"])
     if purge_rate is not None:
         o["split"].SplitsValue = (float(purge_rate), 1.0 - float(purge_rate))
 
@@ -143,6 +176,7 @@ def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
     column_ok = bool(o["column"].ColumnFlowsheet.CfsConverged)
     recycle_ok = (o["recycle"].RecycleConvergence == 1)
 
+    _check_pressure_cell(o)
     purge_kg_h = read_components(purge.ComponentMassFlow, "kg/h")
     fresh_kgmole_h = read(co2in.MolarFlow, "kgmole/h") + read(h2in.MolarFlow, "kgmole/h")
     return {
