@@ -13,19 +13,22 @@ Typical session::
                         ratio=3.0, volume=(25, "m3"), purge_rate=0.05)
     dump(objects["reactor"])
 
-Values ending in ``Value`` on HYSYS objects are plain numbers in HYSYS
-internal units (kPa, C, m3, kg/s, kgmole/s, kJ/s).  Inputs to ``run_point``
-may be given as bare numbers in those units or as ``(number, "unit")`` pairs,
-which are converted through HYSYS's own unit tables.
+Inputs to ``run_point`` may be given as bare numbers in HYSYS internal units
+(kPa, C, m3) or as ``(number, "unit")`` pairs, which are converted through
+HYSYS's own unit tables.  Every result key carries its unit in its name
+(``T_in_C``, ``methanol_kg_h``, ``reactor_duty_kW``); dimensionless keys have
+none.  Results are read from HYSYS with an explicit unit request, never via
+the ``...Value`` internal-unit properties.  ``RESULT_UNITS`` maps each key to
+its unit string for labelling plots and tables.
 """
 from __future__ import annotations
 
 import time
 from datetime import datetime
 
-from hysys import to_internal, solve
+from hysys import to_internal, solve, read, read_components
 
-__all__ = ["cache_objects", "run_point"]
+__all__ = ["cache_objects", "run_point", "RESULT_UNITS"]
 
 # ---------------------------------------------------------------------------
 # Flowsheet objects
@@ -73,6 +76,20 @@ def cache_objects(case) -> dict:
 # Running a point
 # ---------------------------------------------------------------------------
 
+RESULT_UNITS = {
+    "pressure_set_kPa": "kPa", "temperature_set_C": "C", "ratio_set": "", "volume_set_m3": "m3",
+    "purge_rate_set": "",
+    "pressure_actual_kPa": "kPa", "T_in_C": "C", "T_out_C": "C", "ratio_actual": "",
+    "volume_actual_m3": "m3",
+    "methanol_kg_h": "kg/h", "hydrogen_purge_kg_h": "kg/h", "co2_purge_kg_h": "kg/h",
+    "co2_input_kg_h": "kg/h", "h2_input_kg_h": "kg/h",
+    "reactor_duty_kW": "kW", "reactor_dP_kPa": "kPa",
+    "carbon_efficiency": "", "recycle_ratio_mol": "",
+    "recycle_converged": "", "column_converged": "", "recycle_iterations": "", "converged": "",
+    "solve_time_s": "s", "timestamp": "",
+}
+
+
 def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
               volume=None, purge_rate=None, timeout: float = 120.0) -> dict:
     """
@@ -85,8 +102,12 @@ def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
     loop converges without them, apply the inputs, solve, restore the column
     and flare, solve again.  Both solves are awaited.
 
-    Results are in internal units except where the key says otherwise
-    (``*_kg_h`` are kg/h, ``reactor_duty_kW`` is kW).
+    Result keys name their unit (see ``RESULT_UNITS``).  The ``*_set_*`` keys
+    echo the inputs after conversion to internal units (kPa, C, m3); the
+    ``*_actual*`` keys are read back from HYSYS: ``pressure_actual_kPa`` is
+    the reactor inlet stream pressure, ``T_in_C`` / ``T_out_C`` the reactor
+    inlet and outlet stream temperatures.  ``recycle_ratio_mol`` is recycle
+    gas molar flow over fresh feed molar flow.
     """
     o = objects
     units, solver = o["units"], o["solver"]
@@ -121,26 +142,30 @@ def run_point(objects: dict, *, pressure=None, temperature=None, ratio=None,
     h2, co2, m = o["h2_index"], o["co2_index"], o["meoh_index"]
     column_ok = bool(o["column"].ColumnFlowsheet.CfsConverged)
     recycle_ok = (o["recycle"].RecycleConvergence == 1)
+
+    purge_kg_h = read_components(purge.ComponentMassFlow, "kg/h")
+    fresh_kgmole_h = read(co2in.MolarFlow, "kgmole/h") + read(h2in.MolarFlow, "kgmole/h")
     return {
-        "pressure_set": pressure,
-        "temperature_set": temperature,
+        "pressure_set_kPa": pressure,
+        "temperature_set_C": temperature,
         "ratio_set": ratio,
-        "volume_set": volume,
+        "volume_set_m3": volume,
         "purge_rate_set": purge_rate,
-        "pressure_actual": o["pressure_cell"].CellValue,
-        "Tin": o["rin"].TemperatureValue,
-        "Tout": o["rout"].TemperatureValue,
-        "ratio_actual": o["ratio_cell"].CellValue,
-        "volume_actual": reactor.TotalVolumeValue,
-        "methanol_kg_h": meoh.MassFlowValue * 3600,
-        "hydrogen_purge_kg_h": purge.ComponentMassFlowValue[h2] * 3600,
-        "co2_purge_kg_h": purge.ComponentMassFlowValue[co2] * 3600,
-        "co2_input_kg_h": co2in.MassFlowValue * 3600,
-        "h2_input_kg_h": h2in.MassFlowValue * 3600,
-        "reactor_duty_kW": reactor.HeatFlowValue,
-        "reactor_dP_kPa": reactor.PressureDropValue,
-        "carbon_efficiency": meoh.ComponentMolarFlowValue[m] / co2in.ComponentMolarFlowValue[co2],
-        "recycle_ratio": o["recycle_gas"].MolarFlowValue / (co2in.MolarFlowValue + h2in.MolarFlowValue),
+        "pressure_actual_kPa": read(o["rin"].Pressure, "kPa"),
+        "T_in_C": read(o["rin"].Temperature, "C"),
+        "T_out_C": read(o["rout"].Temperature, "C"),
+        "ratio_actual": float(o["ratio_cell"].CellValue),          # dimensionless spreadsheet cell
+        "volume_actual_m3": read(reactor.TotalVolume, "m3"),
+        "methanol_kg_h": read(meoh.MassFlow, "kg/h"),
+        "hydrogen_purge_kg_h": purge_kg_h[h2],
+        "co2_purge_kg_h": purge_kg_h[co2],
+        "co2_input_kg_h": read(co2in.MassFlow, "kg/h"),
+        "h2_input_kg_h": read(h2in.MassFlow, "kg/h"),
+        "reactor_duty_kW": read(reactor.HeatFlow, "kW"),
+        "reactor_dP_kPa": read(reactor.PressureDrop, "kPa"),
+        "carbon_efficiency": (read_components(meoh.ComponentMolarFlow, "kgmole/h")[m]
+                              / read_components(co2in.ComponentMolarFlow, "kgmole/h")[co2]),
+        "recycle_ratio_mol": read(o["recycle_gas"].MolarFlow, "kgmole/h") / fresh_kgmole_h,
         # convergence flags: filter rows on these before trusting the numbers
         "recycle_converged": recycle_ok,
         "column_converged": column_ok,
