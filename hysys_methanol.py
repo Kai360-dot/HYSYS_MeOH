@@ -38,6 +38,7 @@ def cache_objects(case) -> dict:
         "purge": streams("Purge"),
         "recycle_gas": streams("VAPToMixer"),       # recycle after compression, into MIX-101
         "reactor": ops("Reactor100"),
+        "compressors": [ops("K-100"), ops("K-105")],   # fresh syngas 30 bar -> P, recycle; the only P-dependent ones
         "split": ops("TEE-100"),                    # purge / recycle tee: (purge, recycle)
         "column": ops("Twp101"),
         "flare": ops("CRV-100"),
@@ -78,6 +79,8 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
 
     co2in, h2in, meoh, purge, reactor = o["co2in"], o["h2in"], o["methanol"], o["purge"], o["reactor"]
     purge_kg_h = by_component(purge, "ComponentMassFlow", "kg/h")
+    co_in = by_component(o["rin"], "ComponentMolarFlow", "kgmole/h")["CO"]
+    co_out = by_component(o["rout"], "ComponentMolarFlow", "kgmole/h")["CO"]
     recycle_ok = o["recycle"].RecycleConvergence == 1
     column_ok = bool(o["column"].ColumnFlowsheet.CfsConverged)
     return {
@@ -93,6 +96,8 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
         "h2_input_kg_h": read(h2in.MassFlow, "kg/h"),
         "reactor_duty_kW": read(reactor.HeatFlow, "kW"),
         "reactor_dP_bar": read(reactor.PressureDrop, "bar"),
+        "co_formation_kgmole_h": co_out - co_in,    # net CO made per pass (reverse water-gas shift)
+        "compression_kW": sum(read(k.EnergyStream.HeatFlow, "kW") for k in o["compressors"]),
         "carbon_efficiency": (by_component(meoh, "ComponentMolarFlow", "kgmole/h")["Methanol"]
                               / by_component(co2in, "ComponentMolarFlow", "kgmole/h")["CO2"]),
         "recycle_ratio": (read(o["recycle_gas"].MolarFlow, "kgmole/h")
