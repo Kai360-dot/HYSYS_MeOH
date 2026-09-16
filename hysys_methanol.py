@@ -81,7 +81,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
     recycle_ok = o["recycle"].RecycleConvergence == 1
     column_ok = bool(o["column"].ColumnFlowsheet.CfsConverged)
     return {
-        "pressure_kPa": read(o["rin"].Pressure, "kPa"),
+        "pressure_bar": read(o["rin"].Pressure, "bar"),
         "temperature_C": read(o["rin"].Temperature, "C"),
         "volume_m3": read(reactor.TotalVolume, "m3"),
         "ratio": float(ratio),
@@ -92,7 +92,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
         "co2_input_kg_h": read(co2in.MassFlow, "kg/h"),
         "h2_input_kg_h": read(h2in.MassFlow, "kg/h"),
         "reactor_duty_kW": read(reactor.HeatFlow, "kW"),
-        "reactor_dP_kPa": read(reactor.PressureDrop, "kPa"),
+        "reactor_dP_bar": read(reactor.PressureDrop, "bar"),
         "carbon_efficiency": (by_component(meoh, "ComponentMolarFlow", "kgmole/h")["Methanol"]
                               / by_component(co2in, "ComponentMolarFlow", "kgmole/h")["CO2"]),
         "recycle_ratio": (read(o["recycle_gas"].MolarFlow, "kgmole/h")

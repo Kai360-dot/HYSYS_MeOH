@@ -71,14 +71,14 @@ def run_point(objects: dict, *, pressure, temperature, volume, flows,
     outlet = by_component(rout, "ComponentMolarFlow", FLOW_UNIT) if converged else {}
     tag = FLOW_UNIT.replace("/", "_")
     return {
-        "pressure_kPa": read(rin.Pressure, "kPa"),
+        "pressure_bar": read(rin.Pressure, "bar"),
         "temperature_C": read(rin.Temperature, "C"),
         "volume_m3": read(reactor.TotalVolume, "m3"),
         **{f"in_{c}_{tag}": v for c, v in inlet.items()},
         **{f"out_{c}_{tag}": v for c, v in outlet.items()},
         "co2_conversion": 1 - outlet["CO2"] / inlet["CO2"] if converged and inlet["CO2"] else None,
         "reactor_duty_kW": read(reactor.HeatFlow, "kW") if converged else None,
-        "reactor_dP_kPa": read(reactor.PressureDrop, "kPa") if converged else None,
+        "reactor_dP_bar": read(reactor.PressureDrop, "bar") if converged else None,
         "converged": converged,
         "solve_time_s": round(time.time() - t0, 2),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
