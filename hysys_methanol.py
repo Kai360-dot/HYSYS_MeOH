@@ -79,8 +79,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
 
     co2in, h2in, meoh, purge, reactor = o["co2in"], o["h2in"], o["methanol"], o["purge"], o["reactor"]
     purge_kg_h = by_component(purge, "ComponentMassFlow", "kg/h")
-    co_in = by_component(o["rin"], "ComponentMolarFlow", "kgmole/h")["CO"]
-    co_out = by_component(o["rout"], "ComponentMolarFlow", "kgmole/h")["CO"]
+    purge_kgmole_h = by_component(purge, "ComponentMolarFlow", "kgmole/h")
     recycle_ok = o["recycle"].RecycleConvergence == 1
     column_ok = bool(o["column"].ColumnFlowsheet.CfsConverged)
     return {
@@ -96,7 +95,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
         "h2_input_kg_h": read(h2in.MassFlow, "kg/h"),
         "reactor_duty_kW": read(reactor.HeatFlow, "kW"),
         "reactor_dP_bar": read(reactor.PressureDrop, "bar"),
-        "co_formation_kgmole_h": co_out - co_in,    # net CO made per pass (reverse water-gas shift)
+        "co_formation_kgmole_h": purge_kgmole_h["CO"],  # steady state: all CO made leaves via the purge
         "compression_kW": sum(read(k.EnergyStream.HeatFlow, "kW") for k in o["compressors"]),
         "carbon_efficiency": (by_component(meoh, "ComponentMolarFlow", "kgmole/h")["Methanol"]
                               / by_component(co2in, "ComponentMolarFlow", "kgmole/h")["CO2"]),
