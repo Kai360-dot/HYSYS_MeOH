@@ -22,11 +22,20 @@ from hysys import read, write, by_component, to_internal, solve
 
 __all__ = ["cache_objects", "run_point"]
 
+# Recycle composition tolerance multiplier (HYSYS default 10).
+RECYCLE_SENSITIVITY = 0.1
+
 
 def cache_objects(case) -> dict:
-    """Look up the streams, unit operations and cells used by `run_point` once per session."""
+    """
+    Look up streams, unit operations and cells used by `run_point` once per
+    session, then tighten the recycle tolerance to `RECYCLE_SENSITIVITY`.
+    """
     fs = case.Flowsheet
     streams, ops = fs.MaterialStreams, fs.Operations
+    recycle = ops("RCY-1")
+    recycle.CompSensitivityValue = RECYCLE_SENSITIVITY
+    recycle.ComponentSensitivityValue = tuple(RECYCLE_SENSITIVITY for _ in recycle.ComponentSensitivityValue)
     return {
         "solver": case.Solver,
         "units": case.Application.UnitConversionSetManager,
@@ -42,7 +51,7 @@ def cache_objects(case) -> dict:
         "split": ops("TEE-100"),                    # purge / recycle tee: (purge, recycle)
         "column": ops("Twp101"),
         "flare": ops("CRV-100"),
-        "recycle": ops("RCY-1"),
+        "recycle": recycle,
         # spreadsheet cells fan one number out to several specs; cells are unitless to COM.
         "pressure_cell": ops("MeOH Pressure").Cell("A1"),           # exported to kPa specs
         "ratio_cell": ops("co2:h2_ratio_equals_3").Cell("C2"),     # H2 : CO2 in the fresh feed
@@ -79,7 +88,8 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
 
     co2in, h2in, meoh, purge, reactor = o["co2in"], o["h2in"], o["methanol"], o["purge"], o["reactor"]
     purge_kg_h = by_component(purge, "ComponentMassFlow", "kg/h")
-    purge_kgmole_h = by_component(purge, "ComponentMolarFlow", "kgmole/h")
+    co_in = by_component(o["rin"], "ComponentMolarFlow", "kgmole/h")["CO"]
+    co_out = by_component(o["rout"], "ComponentMolarFlow", "kgmole/h")["CO"]
     recycle_ok = o["recycle"].RecycleConvergence == 1
     column_ok = bool(o["column"].ColumnFlowsheet.CfsConverged)
     return {
@@ -95,7 +105,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
         "h2_input_kg_h": read(h2in.MassFlow, "kg/h"),
         "reactor_duty_kW": read(reactor.HeatFlow, "kW"),
         "reactor_dP_bar": read(reactor.PressureDrop, "bar"),
-        "co_formation_kgmole_h": purge_kgmole_h["CO"],  # steady state: all CO made leaves via the purge
+        "co_formation_kgmole_h": co_out - co_in,    # net CO made per pass (reverse water-gas shift)
         "compression_kW": sum(read(k.EnergyStream.HeatFlow, "kW") for k in o["compressors"]),
         "carbon_efficiency": (by_component(meoh, "ComponentMolarFlow", "kgmole/h")["Methanol"]
                               / by_component(co2in, "ComponentMolarFlow", "kgmole/h")["CO2"]),
