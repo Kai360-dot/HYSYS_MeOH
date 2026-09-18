@@ -12,6 +12,7 @@ dependencies = [
     "pyarrow>=25.0.1",
     "pywin32>=312",
     "scipy>=1.18.1",
+    "torch>=2.14.0",
 ]
 
 [dependency-groups]
