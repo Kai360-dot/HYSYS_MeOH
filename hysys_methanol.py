@@ -88,7 +88,8 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
 
     co2in, h2in, meoh, purge, reactor = o["co2in"], o["h2in"], o["methanol"], o["purge"], o["reactor"]
     purge_kg_h = by_component(purge, "ComponentMassFlow", "kg/h")
-    co_in = by_component(o["rin"], "ComponentMolarFlow", "kgmole/h")["CO"]
+    inlet = by_component(o["rin"], "ComponentMolarFlow", "kgmole/h")
+    co_in = inlet["CO"]
     co_out = by_component(o["rout"], "ComponentMolarFlow", "kgmole/h")["CO"]
     recycle_ok = o["recycle"].RecycleConvergence == 1
     column_ok = bool(o["column"].ColumnFlowsheet.CfsConverged)
@@ -103,6 +104,7 @@ def run_point(objects: dict, *, pressure, temperature, volume, ratio, purge_rate
         "co2_purge_kg_h": purge_kg_h["CO2"],
         "co2_input_kg_h": read(co2in.MassFlow, "kg/h"),
         "h2_input_kg_h": read(h2in.MassFlow, "kg/h"),
+        **{f"in_{c}_kgmole_h": v for c, v in inlet.items()},       # reactor inlet, per component
         "reactor_duty_kW": read(reactor.HeatFlow, "kW"),
         "reactor_dP_bar": read(reactor.PressureDrop, "bar"),
         "co_formation_kgmole_h": co_out - co_in,    # net CO made per pass (reverse water-gas shift)
