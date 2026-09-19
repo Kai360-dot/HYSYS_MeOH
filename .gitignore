@@ -6,3 +6,4 @@ __pycache__/
 *.bk0
 initial_exploration.ipynb
 *.csv
+TestAspenFile/methanol.bk0
