@@ -9,32 +9,29 @@ flowsheet, including the separation and RCY-1, is still solved by HYSYS.
     from hysys_surrogate import cache_objects, run_point
 
     case    = open_case("C:/.../open_methanol.hsc")
-    objects = cache_objects(case)
+    objects = cache_objects(case, box)            # box: {name: (lo, hi)} in INPUTS order
     net     = Surrogate.load("pfr_surrogate_raw.txt")
     row     = run_point(objects, net, pressure=(90, "bar"), temperature=(250, "C"),
                         ratio=3.0, purge_rate=0.03)
 
-The net is the "raw" surrogate from ``PFR_Explore.ipynb``: inputs in `INPUTS`
-order (C, bar, kgmole/s), outputs the six outlet flows in kgmole/h, duty in kW
-and pressure drop in bar.  The "stoi" surrogate is used through
-``stoi_as_raw(Surrogate.load("pfr_surrogate_stoi.txt"))``.  Both were trained
-at a fixed reactor volume, so `run_point` takes no volume.  The training box is
-read from ``pfr_box.json`` next to this file.
+The net is the "raw" surrogate from ``methanol_surrogate_pipeline.ipynb``:
+inputs in `INPUTS` order (C, bar, kgmole/s), outputs the six outlet flows in
+kgmole/h, duty in kW and pressure drop in bar.  The "stoi" surrogate is used
+through ``stoi_as_raw(Surrogate.load("pfr_surrogate_stoi.txt"))``.  Both were
+trained at a fixed reactor volume, so `run_point` takes no volume.  `box` is
+the training box; inputs that leave it are reported per point.
 """
 from __future__ import annotations
 
 import time
 from datetime import datetime
 
-import json
-from pathlib import Path
-
 import numpy as np
 
 from hysys import read, write, by_component, to_internal, solve
 
 __all__ = ["cache_objects", "reactor_step", "is_converged", "run_point", "stoi_as_raw",
-           "INPUTS", "COMPONENTS", "BOX"]
+           "INPUTS", "COMPONENTS", "STOICH"]
 
 # RCY-1 stays in the cut case as a pass-through.  Its tolerance is set far below
 # the tear tolerance so it never holds back a change the net makes (HYSYS default 10).
@@ -43,14 +40,6 @@ RECYCLE_SENSITIVITY = 0.001
 COMPONENTS = ["Hydrogen", "CO", "CO2", "H2O", "Methanol", "Nitrogen"]   # the ones that reach the reactor
 INPUTS = ["temperature_C", "pressure_bar", *COMPONENTS]                 # net input order
 STOICH = np.array([[-3, -1], [0, 1], [-1, -1], [1, 1], [1, 0], [0, 0]], float)   # rows COMPONENTS, cols xi1, xi2
-
-_box_file = Path(__file__).with_name("pfr_box.json")                    # written by PFR_Explore.ipynb
-if not _box_file.exists():
-    raise FileNotFoundError(f"{_box_file} missing: run the knobs cell of PFR_Explore.ipynb")
-with open(_box_file, encoding="utf-8") as _f:
-    BOX = {k: tuple(v) for k, v in json.load(_f).items()}                  # training box of the nets
-if list(BOX) != INPUTS:
-    raise ValueError(f"box order {list(BOX)} differs from INPUTS {INPUTS}")
 
 
 def stoi_as_raw(net):
@@ -65,8 +54,13 @@ def stoi_as_raw(net):
     return wrapped
 
 
-def cache_objects(case) -> dict:
-    """Same lookups as ``hysys_methanol.cache_objects``; Reactor100 must be ignored in this case."""
+def cache_objects(case, box: dict) -> dict:
+    """
+    Same lookups as ``hysys_methanol.cache_objects`` plus the training `box`
+    (``{name: (lo, hi)}`` in `INPUTS` order); Reactor100 must be ignored in this case.
+    """
+    if list(box) != INPUTS:
+        raise ValueError(f"box order {list(box)} differs from INPUTS {INPUTS}")
     fs = case.Flowsheet
     streams, ops = fs.MaterialStreams, fs.Operations
     rin = streams("RinV")
@@ -94,6 +88,7 @@ def cache_objects(case) -> dict:
         "pressure_cell": ops("MeOH Pressure").Cell("A1"),
         "ratio_cell": ops("co2:h2_ratio_equals_3").Cell("C2"),
         "components": list(rin.FluidPackage.Components.Names),          # order of component arrays
+        "box": {k: tuple(v) for k, v in box.items()},
     }
 
 
@@ -117,7 +112,7 @@ def reactor_step(objects: dict, net, timeout: float = 120.0) -> dict:
     rout.ComponentMolarFlow.SetValues(tuple(float(outlet.get(c, 0.0)) for c in o["components"]), "kgmole/h")
     write(rout.Pressure, (x[1] - dp, "bar"))
     solve(o["solver"], timeout)
-    outside = [k for k, v, (lo, hi) in zip(INPUTS, x, BOX.values()) if not lo <= v <= hi]
+    outside = [k for k, v, (lo, hi) in zip(INPUTS, x, o["box"].values()) if not lo <= v <= hi]
     return {"x": x, "outlet_kgmole_h": outlet, "duty_kW": duty, "dP_bar": dp,
             "co_formation_kgmole_h": outlet["CO"] - flows["CO"] * 3600.0, "outside_box": outside}
 
