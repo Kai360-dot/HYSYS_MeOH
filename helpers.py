@@ -55,6 +55,18 @@ class Surrogate:
                     f.write(" ".join(f"{v:.17g}" for v in row) + "\n")
                 f.write(" ".join(f"{v:.17g}" for v in bl) + "\n")
 
+    @classmethod
+    def load(cls, path):
+        """Read a net written by `export`."""
+        with open(path) as f:
+            it = iter(f.read().split())
+        W, b = [], []
+        for _ in range(int(next(it))):
+            n_in, n_out = int(next(it)), int(next(it))
+            W.append(np.array([float(next(it)) for _ in range(n_in * n_out)]).reshape(n_out, n_in))
+            b.append(np.array([float(next(it)) for _ in range(n_out)]))
+        return cls(W, b)
+
 
 def fit_mlp(X, Y, *, hidden: int = 16, layers: int = 2, max_iter: int = 500, seed: int = 0) -> Surrogate:
     """
